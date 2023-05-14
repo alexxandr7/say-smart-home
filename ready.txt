@@ -1,0 +1,1137 @@
+#include <ESP8266WiFi.h>
+#include <WiFiClient.h>
+#include <ESP8266WebServer.h>
+#include <FastLED.h>
+#include <stdlib.h>
+using namespace std;
+
+#define LED_PIN D2
+#define COLOR_ORDER GRB
+#define CHIPSET WS2812
+#define BRIGHTNESS 64
+
+// Параметры ширины и высоты матрицы
+const uint8_t kMatrixWidth = 16;
+const uint8_t kMatrixHeight = 16;
+
+// Param for different pixel layouts
+const bool kMatrixSerpentineLayout = true;
+const bool kMatrixVertical = false;
+
+uint16_t XY(uint8_t x, uint8_t y) {
+  uint16_t i;
+
+  if (kMatrixSerpentineLayout == false) {
+    if (kMatrixVertical == false) {
+      i = (y * kMatrixWidth) + x;
+    } else {
+      i = kMatrixHeight * (kMatrixWidth - (x + 1)) + y;
+    }
+  }
+
+  if (kMatrixSerpentineLayout == true) {
+    if (kMatrixVertical == false) {
+      if (y & 0x01) {
+        // Odd rows run backwards
+        uint8_t reverseX = (kMatrixWidth - 1) - x;
+        i = (y * kMatrixWidth) + reverseX;
+      } else {
+        // Even rows run forwards
+        i = (y * kMatrixWidth) + x;
+      }
+    } else {  // vertical positioning
+      if (x & 0x01) {
+        i = kMatrixHeight * (kMatrixWidth - (x + 1)) + y;
+      } else {
+        i = kMatrixHeight * (kMatrixWidth - x) - (y + 1);
+      }
+    }
+  }
+
+  return i;
+}
+
+// Задаем параметры матрицы
+#define NUM_LEDS (kMatrixWidth * kMatrixHeight)
+CRGB leds_plus_safety_pixel[NUM_LEDS + 1];
+CRGB* const leds(leds_plus_safety_pixel + 1);
+
+//Цвет, которым все закрашивается
+uint8_t start_color = 237;
+
+//Параметры(HUE) свтодиодов, определяющих границы квартиры
+#define W_H 124
+#define E_H 0
+
+//Двумерный массив, определающий границы комнаты
+uint8_t HUE[16][16] = {
+  { E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H },
+  { E_H, E_H, E_H, E_H, E_H, E_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H },
+  { E_H, E_H, E_H, E_H, E_H, E_H, W_H, E_H, E_H, E_H, E_H, W_H, E_H, E_H, E_H, W_H },
+  { E_H, E_H, E_H, E_H, E_H, E_H, W_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, W_H },
+  { E_H, E_H, E_H, E_H, E_H, E_H, W_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, W_H },
+  { E_H, E_H, E_H, E_H, E_H, E_H, W_H, E_H, E_H, E_H, E_H, W_H, E_H, E_H, E_H, W_H },
+  { W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, E_H, E_H, W_H, W_H,},
+  { W_H, E_H, E_H, E_H, E_H, E_H, W_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, W_H },
+  { W_H, E_H, E_H, E_H, E_H, E_H, W_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, W_H },
+  { W_H, E_H, E_H, E_H, E_H, E_H, W_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, W_H },
+  { W_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, W_H },
+  { W_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, W_H },
+  { W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H, W_H },
+  { E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H },
+  { E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H },
+  { E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H, E_H },
+};
+
+
+//Имя и пароль точки доступа
+const char* ssid = "NodeMCU";       // SSID
+const char* password = "123456783";  // пароль
+
+/* Настройки IP адреса */
+IPAddress local_ip(192,168,1,1);
+IPAddress gateway(192,168,1,1);
+IPAddress subnet(255,255,255,0);
+
+ESP8266WebServer server(80);
+
+//Пины для работы с регистром
+#define LATCH D6
+#define CLOCK D5
+#define DATA D7
+
+bool LEDKitchen = LOW;
+bool LEDBathroom = LOW;
+bool LEDHallway = LOW;
+bool LEDLiving = LOW;
+bool LEDAll = LOW;
+
+bool flag_kitchen = false;
+bool flag_bathroom = false;
+bool flag_living = false;
+bool flag_hallway = false; 
+bool flag_all = false;
+
+unsigned char all_leds = 0;
+//Функция, активирующая регистр
+void activate_register(unsigned char led_group, bool state) {
+  if (state) {
+    all_leds = all_leds | led_group;
+  } else {
+    all_leds = all_leds & led_group;
+  }
+
+  digitalWrite(LATCH, LOW);
+  shiftOut(DATA, CLOCK, LSBFIRST, all_leds);
+  digitalWrite(LATCH, HIGH);
+}
+
+//Рисуем границы квартиры
+void DrawOneFrame() {
+  for (uint8_t x = 0; x < kMatrixWidth; x++) {
+    for (uint8_t y = 0; y < kMatrixHeight; y++) {
+      uint8_t pixelHue = HUE[x][y];
+      if (pixelHue == E_H) {
+        leds[XY(x, y)] = CHSV(pixelHue, 0, 0);
+      } else {
+        leds[XY(x, y)] = CHSV(pixelHue, 255, 255);
+      }
+    }
+  }
+}
+
+//Функция закрашивания пространства определенной комнаты
+
+void drawRectangle(uint8_t start_x, uint8_t end_x, uint8_t start_y, uint8_t end_y, bool state, uint8_t color){
+  for(uint8_t i = start_x; i <= end_x; i++){
+    for(uint8_t j = start_y; j <= end_y; j++){
+      if(state){
+        leds[XY(i, j)] = CHSV(color, 255, 255);
+      }
+      else{
+        leds[XY(i, j)] = CHSV(0, 0, 0);
+      }
+      
+    }
+  }
+}
+
+//Функция включения/выключения света в ванной
+
+void bathroom_lights(bool turn_state, uint8_t col){
+  bool turn;
+  if(turn_state){
+    turn = 1;
+  }
+  else{
+    turn = 0;
+  }
+  drawRectangle(2, 5, 7, 10, turn, col);
+  drawRectangle(3, 4, 11, 11, turn, col);
+}
+
+//Функция включения/выключения света в прихожей
+
+void hallway_lights(bool turn_state, uint8_t col){
+  bool turn;
+  if(turn_state){
+    turn = 1;
+  }
+  else{
+    turn = 0;
+  }
+
+  drawRectangle(2, 5, 12, 14, turn, col);
+  drawRectangle(3, 4, 11, 11, turn, col);
+  drawRectangle(6, 6, 12, 13, turn, col);
+}
+
+//Функция включения/выключения света в гостиной
+
+void living_lights(bool turn_state, uint8_t col){
+  bool turn;
+  if(turn_state){
+    turn = 1;
+  }
+  else{
+    turn = 0;
+  }
+
+  drawRectangle(6, 6, 12, 13, turn, col);
+  drawRectangle(7, 11, 7, 14, turn, col);
+  drawRectangle(10, 11, 6, 6, turn, col);
+  
+}
+
+//Функция включения/выключения света на кухне
+
+void kitchen_lights(bool turn_state, uint8_t col){
+  bool turn;
+  if(turn_state){
+    turn = 1;
+  }
+  else{
+    turn = 0;
+  }
+  drawRectangle(10, 11, 6, 6, turn, col);
+  drawRectangle(7, 11, 1, 5, turn, col);  
+}
+
+//Функция включения/выключения света везде
+
+void all_lights(bool turn_state, uint8_t col){
+  bool turn;
+  if(turn_state){
+    turn = 1;
+  }
+  else{
+    turn = 0;
+  }
+  drawRectangle(2, 5, 7, 10, turn, col);
+  drawRectangle(3, 4, 11, 11, turn, col);
+  drawRectangle(10, 11, 6, 6, turn, col);
+  drawRectangle(7, 11, 1, 5, turn, col); 
+  drawRectangle(6, 6, 12, 13, turn, col);
+  drawRectangle(10, 11, 6, 6, turn, col);
+  drawRectangle(2, 5, 12, 14, turn, col);
+  drawRectangle(7, 11, 7, 14, turn, col);
+}
+
+void setup() 
+{
+  //Настройки матрицы
+  FastLED.addLeds<CHIPSET, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalSMD5050);
+  FastLED.setBrightness(BRIGHTNESS);
+
+  //Рисуем границы квартиры
+  DrawOneFrame();
+
+  Serial.begin(115200); //Прослушиваем консоль
+
+  //Пины для работы с регистром
+  pinMode(LATCH, OUTPUT);
+  pinMode(CLOCK, OUTPUT);
+  pinMode(DATA, OUTPUT);
+  //Говорим регистру работать, но не включать никакие светодиоды
+  activate_register(0, true);
+
+  //Раздаем WiFi
+  WiFi.softAP(ssid, password);
+  WiFi.softAPConfig(local_ip, gateway, subnet);
+  delay(100);
+  
+  server.on("/", handleRoot);
+  server.on("/led_set_on_kitchen", kitchen_led_control);
+  server.on("/led_set_on_living", living_led_control);
+  server.on("/led_set_on_bathroom", bathroom_led_control);
+  server.on("/led_set_on_hallway", hallway_led_control);
+  server.on("/led_set_on_all", all_led_control);
+  server.on("/led_set_off_all", all_led_off_control);
+  server.on("/changeColor", ChangeMatrixColor);
+  
+  
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void loop() {
+  server.handleClient();
+  if(LEDAll){
+    all_lights(1, start_color);
+    flag_kitchen = true;
+    flag_living = true;
+    flag_bathroom = true;
+    flag_hallway = true;
+    activate_register(0b11111110, true);}
+  else{
+    all_lights(0, start_color);
+    flag_kitchen = false;
+    flag_living = false;
+    flag_bathroom = false;
+    flag_hallway = false;
+    activate_register(0b00000000, false);}
+  
+  if(LEDBathroom){
+    bathroom_lights(1, start_color);
+    flag_bathroom = true;
+    activate_register(0b00000010, true);}
+  else{
+    bathroom_lights(0, start_color);
+    flag_bathroom = false;
+    activate_register(0b11111101, false);}
+
+  if(LEDKitchen){
+    kitchen_lights(1, start_color);
+    flag_kitchen = true;
+    activate_register(0b01100000, true);}
+  else{
+    kitchen_lights(0, start_color);
+    flag_kitchen = false;
+    activate_register(0b10011111, false);}
+
+  if(LEDHallway){
+    hallway_lights(1, start_color);
+    flag_hallway = true;
+    activate_register(0b10000000, true);}
+  else{
+    hallway_lights(0, start_color);
+    flag_hallway = false;
+    activate_register(0b01111111, false);}
+  
+  if(LEDLiving){
+    living_lights(1, start_color);
+    flag_living = true;
+    activate_register(0b00011100, true);}
+  else{
+    living_lights(0, start_color);
+    flag_living = false;
+    activate_register(0b11100011, false);}  
+
+  if (flag_living){
+      living_lights(1, start_color);
+    }
+    if (flag_kitchen){
+      kitchen_lights(1, start_color);
+    }
+    if (flag_bathroom){
+      bathroom_lights(1, start_color);
+    }
+    if (flag_hallway){
+      hallway_lights(1, start_color);
+    }
+
+
+  FastLED.show();//Включаем светодиоды
+}
+
+
+
+
+void handleRoot(){
+String ptr = R"=====(
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Панель управления освещением</title>
+	<style type="text/css">
+		body {
+	margin: 0px;
+	padding: 0px;
+	background-color: #1F1F1F;
+}
+
+
+
+.plan { 
+	padding: 30px;
+	height: calc(100vh - 60px);
+	display: grid;
+	grid-template-areas: "enabling-buttons-container enabling-buttons-container bathroom hallway" 
+						"palette kitchen living living";
+	grid-template-columns: 25% 25% 25% 25%;
+	grid-template-rows: 60% auto;
+}
+
+.kitchen {
+	grid-area: kitchen;
+	border-radius: 0px !important;
+	border: 10px solid rgba(255, 255, 255, 0.1);
+	border-right: 0px !important;
+}
+
+.living {
+	grid-area: living;
+	border-radius: 0px !important;
+	border: 10px solid rgba(255, 255, 255, 0.1);
+}
+
+.bathroom {
+	grid-area: bathroom;
+	border-radius: 0px !important;
+	border: 10px solid rgba(255, 255, 255, 0.1);
+	border-bottom: 0px !important;
+}
+
+.hallway {
+	grid-area: hallway;
+	border-radius: 0px !important;
+	border-bottom: 0px !important;
+	border-left: 0px !important;
+}
+
+.room-text{
+	font-family: "Inter", Arial, sans-serif;
+	color: rgba(255, 255, 255, 0.4);
+	margin-left: 20px;
+	margin-top: 20px;
+	font-size: 18px;
+	font-weight: normal;
+}
+
+.enabling-buttons-container {
+	grid-area: enabling-buttons-container;
+	border: 2px solid rgba(255, 255, 255, 0.1);
+	border-radius: 16px;
+	padding: 40px;
+	display: flex;
+	flex-direction: column;
+	gap: 30px;
+	margin-right: 30px;
+	margin-bottom: 30px;
+}
+
+.switches-container {
+	display: flex;
+	flex-direction: row;
+	gap: 20px;
+	height: 100%;
+}
+
+
+.palette {
+	grid-area: palette;
+
+	display: flex;
+	flex-direction: column;
+	border: 2px solid rgba(255, 255, 255, 0.1);
+	border-radius: 16px;
+	max-width: 320px;
+	padding: 40px;
+	gap: 20px;
+	margin-right: 30px;
+}
+
+.change-color-buttons {
+	display: grid;
+	grid-template-areas: 'a b c'
+						 'd e _';
+
+	grid-template-columns: auto auto auto;
+	grid-template-rows: auto auto;
+	flex-direction: row;
+	gap: 15px;
+	flex-wrap: wrap;
+	height: 100%;
+}
+
+.enabling-button {
+	background-color: rgba(255, 255, 255, 0.1);
+	border-radius: 16px;
+	border: 0px;
+	display: flex;
+	flex-direction: column;
+
+	width: 100%;
+}
+
+.switch-all-container {
+	display: flex;
+	flex-direction: row;
+	gap: 30px;
+
+}
+.turn-on-button:hover{
+	color: black;
+	background-color: rgba(255, 255, 255, 0.4);
+	font-weight: normal;
+	transition: background-color 0.5s;
+	font-family: "Inter", Arial, sans-serif;
+}
+.turn-off-button:hover{
+	color: black;
+	background-color: rgba(255, 255, 255, 0.4);
+	font-weight: normal;
+	transition: background-color 0.5s;
+	font-family: "Inter", Arial, sans-serif;
+}
+
+.turn-all-button {
+	border: 2px solid rgba(255, 255, 255, 0.1);
+	border-radius: 16px;
+	background-color: rgba(31, 31, 31, 1.0);
+	color: rgba(255, 255, 255, 0.4);
+	font-family: "Inter", Arial, sans-serif;
+	font-size: 18px;
+	display: flex;
+	flex-direction: row;
+	gap: 10px;
+	padding: 20px;
+	width: 100%;
+	align-items: center;
+	justify-content: center;
+}
+
+.palette-text {
+	font-family: "Inter", Arial, sans-serif;
+	color: rgba(255, 255, 255, 0.4);
+	font-size: 25px;
+	border-bottom: 2px solid rgba(255, 255, 255, 0.4);
+	padding-bottom: 5px;
+}
+
+hr {
+	border: 2px solid rgba(255, 255, 255, 0.1);
+	width: 300px;
+}
+
+.palette-button {
+	min-width:40px;
+	min-height: 40px;
+	border-radius: 8px;
+	transform: translateY(0px);
+	transition: transform 0.2s;
+	border: 0px;
+
+}
+
+
+.yellow-button {
+	background-color: #E1C00F;
+	grid-area: a;
+}
+.pink-button {
+	background-color: #F513B6;
+	grid-area: b;
+}
+.red-button {
+	background-color: #E03838;
+	grid-area: c;
+}
+.green-button {
+	background-color: #17D262;
+	grid-area: d;
+}
+.blue-button {
+	background-color: #294FD6;
+	grid-area: e;
+}
+
+.palette-button:hover {
+	border-radius: 8px;
+	border-width: 4px;
+	transform: translateY(7px);
+
+}
+.yellow-button:hover {
+	border: solid rgba(255, 255, 255, 0.4);
+}
+
+.controls-container {
+	display: flex;
+	flex-direction: column;
+	gap: 20px;
+	max-width: 670px;
+}
+
+.chernavskiy_leha {
+	display: flex;
+	flex-direction: row;
+}
+
+.room-button {
+	background-color: transparent;
+	border: 10px solid rgba(255, 255, 255, 0.1);
+}
+
+.room-button:hover {
+	background-clip: content-box;
+	background-color: #5d6063;
+	transition: background-color 0.5s;
+}
+
+.state-indicator {
+	min-width: 110%;
+	min-height: 30%;
+	z-index: 10px;
+	background-color: rgb(124, 124, 124);
+	border-radius: 8px;
+	align-self: center;
+	color: #FFFFFF;
+	font-family: "Inter", Arial, sans-serif;
+	font-weight: bold;
+	font-size: 42px;
+	box-shadow: 0px 0px 20px rgb(124, 124, 124);
+}
+
+.state-indicator:hover{
+	min-height: 32%;
+	min-width: 115%;
+	padding-top: 5px;
+	background-color: rgb(124, 124, 124);
+	box-shadow: 0px 0px 20px rgb(124, 124, 124);
+}
+
+.button-header {
+	color: #FFFFFF;
+	font-weight: bold;
+	font-size: 18px;
+	font-family: "Inter", Arial, sans-serif;
+	position: absolute;
+	margin-left: 2px;
+	margin-top: 135px;
+}
+
+.status {
+	position: absolute;
+	margin-left: 2px;
+	margin-top: 155px;
+	color: #FFFFFF;
+	font-weight: normal;
+	font-size: 12px;
+	font-family: "Inter", Arial, sans-serif;
+}
+	</style>
+</head>
+<body>
+	<div class="plan">
+		<div class="enabling-buttons-container">
+			<div class="switches-container">
+				<button class="kitchen-button enabling-button">
+					<div class="state-indicator" onclick="changeKitchenOnClick();" id="change-bg-kitchen">OFF</div>
+					<div class="button-header">Кухня</div>
+					<div class="status" id="status-kitchen">Выключено</div>
+				</button>
+				<button class="living-button enabling-button">
+					<div class="state-indicator" onclick="changeLivingOnClick();" id="change-bg-living">OFF</div>
+					<div class="button-header">Гостиная</div>
+					<div class="status" id="status-living">Выключено</div>
+				</button>
+				<button class="bathroom-button enabling-button">
+					<div class="state-indicator" onclick="changeBathroomOnClick();" id="change-bg-bathroom">OFF</div>
+					<div class="button-header">Ванная</div>
+					<div class="status" id="status-bathroom">Выключено</div>
+				</button>
+				<button class="hallway-button enabling-button">
+					<div class="state-indicator" onclick="changeHallwayOnClick();" id="change-bg-hallway">OFF</div>
+					<div class="button-header">Прихожая</div>
+					<div class="status" id="status-hallway">Выключено</div>
+				</button>
+			</div>
+				
+			<div class="switch-all-container">
+				<button class="turn-on-button turn-all-button" onclick="changeAllOnClick(); " id = "turn-on-all-leds"><img src="images/Vector.svg">Включить все</button>
+				<button class="turn-off-button turn-all-button" onclick="changeAllOffClick();" id = "turn-off-all-leds"><img src="images/Vector_off.svg">Выключить все</button>
+			</div>
+		</div>
+
+		<div class="palette">
+			<div class="palette-text">Палитра</div>
+			<div class="change-color-buttons">
+				<button class="palette-button yellow-button" onclick="ChooseColor('#E1C00F'); ChangeColorMatrix('yellow');" id="yellow-button"></button>
+				<button class="palette-button pink-button" onclick="ChooseColor('#F513B6'); ChangeColorMatrix('pink');" id="pink-button"></button>
+				<button class="palette-button red-button" onclick="ChooseColor('#E03838'); ChangeColorMatrix('red');" id="red-button"></button>
+				<button class="palette-button blue-button" onclick="ChooseColor('#294FD6'); ChangeColorMatrix('blue');" id="blue-button"></button>
+				<button class="palette-button green-button" onclick="ChooseColor('#17D262'); ChangeColorMatrix('green');" id="green-button"></button>
+			</div>
+		</div>
+
+
+		<div class="kitchen room-button" id="kitchen-plan" onclick = "changeKitchenOnClick();"><div class="room-text" id="RoomNameKitchen">Кухня</div></div>
+		<div class="living room-button" id="living-plan" onclick = "changeLivingOnClick();"><div class="room-text" id="RoomNameLiving">Гостиная</div></div>
+		<div class="bathroom room-button" id="bathroom-plan" onclick = "changeBathroomOnClick();"><div class="room-text" id="RoomNameBathroom">Ванная комната</div></div>
+		<div class="hallway room-button" id="hallway-plan" onclick = "changeHallwayOnClick();"><div class="room-text" id="RoomNameHallway">Прихожая</div></div>
+	</div>
+
+
+	<script type="text/javascript">
+		var stateOfButton = true;
+let allColor = '#F513B6'
+var KitchenEnabled = 0;
+var LivingEnabled = 0;
+var BathroomEnabled = 0;
+var HallwayEnabled = 0;
+
+workWithColors(allColor, 'circle');
+
+function changeColorEnablingButtons(element, statusElement) {
+  			const elem = document.getElementById(element);
+
+  			if(elem.style.backgroundColor == 'rgb(0, 218, 126)'){
+
+  				elem.style.backgroundColor = 'rgb(124, 124, 124)';
+  				elem.style.boxShadow = '0px 0px 28px rgb(124, 124, 124)';
+  				elem.textContent = 'OFF';
+  				document.getElementById(statusElement).textContent = 'Выключено';
+  				changeColorOnPlan(element, false);
+  			}
+  			else{
+  				elem.style.backgroundColor = 'rgb(0, 218, 126)';
+  				elem.style.boxShadow = '0px 0px 20px rgb(0, 218, 126)';
+  				elem.textContent = 'ON';
+  				document.getElementById(statusElement).textContent = 'Включено';
+  				changeColorOnPlan(element, true, allColor);
+  				
+  			}
+  			
+		}
+
+function changeColorOnPlan(IdElement, state, color){
+	if (IdElement == 'change-bg-kitchen'){
+		place = document.getElementById("kitchen-plan");
+		if (state){
+			place.style.backgroundColor = color;
+			place.style.border = "10px solid #4A4949";
+			KitchenEnabled = 1;
+
+		}
+		else {
+			place.style.backgroundColor = '';
+			place.style.border = '10px solid rgba(255, 255, 255, 0.1)';
+			KitchenEnabled = 0;
+		}
+		
+	}
+	else if (IdElement == 'change-bg-living') {
+		place = document.getElementById("living-plan");
+		if (state){
+			place.style.backgroundColor = color;
+			place.style.border = "10px solid #4A4949";
+			LivingEnabled = 1;
+
+		}
+		else {
+			place.style.backgroundColor = '';
+			place.style.border = '10px solid rgba(255, 255, 255, 0.1)';
+			LivingEnabled = 0;
+		}
+	}
+	else if (IdElement == 'change-bg-bathroom') {
+		place = document.getElementById("bathroom-plan");
+		if (state){
+			place.style.backgroundColor = color;
+			place.style.border = "10px solid #4A4949";
+			BathroomEnabled = 1;
+
+		}
+		else {
+			place.style.backgroundColor = '';
+			place.style.border = '10px solid rgba(255, 255, 255, 0.1)';
+			BathroomEnabled = 0;
+		}
+	}
+	else if (IdElement == 'change-bg-hallway') {
+		place = document.getElementById("hallway-plan");
+		if (state){
+			place.style.backgroundColor = color;
+			place.style.border = "10px solid #4A4949";
+			HallwayEnabled = 1;
+
+		}
+		else {
+			place.style.backgroundColor = '';
+			place.style.border = '10px solid rgba(255, 255, 255, 0.1)';
+			HallwayEnabled = 0;
+		}
+	}
+}
+
+
+
+function ChooseColor(color){
+	if(!KitchenEnabled){
+		changeColorOnPlan('change-bg-kitchen', false, color);
+	}
+	else{
+		changeColorOnPlan('change-bg-kitchen', true, color);
+	}
+	if(!LivingEnabled){
+		changeColorOnPlan('change-bg-living', false, color);
+	}
+	else{
+		changeColorOnPlan('change-bg-living', true, color);
+	}
+	if(!BathroomEnabled){
+		changeColorOnPlan('change-bg-bathroom', false, color);
+	}
+	else{
+		changeColorOnPlan('change-bg-bathroom', true, color);
+	}
+	if(!HallwayEnabled){
+		changeColorOnPlan('change-bg-hallway', false, color);
+	}
+	else{
+		changeColorOnPlan('change-bg-hallway', true, color);
+	}
+	var lastColor = allColor;
+	allColor = color;
+	workWithColors(lastColor, 'circle');
+	if (lastColor != allColor){
+		workWithColors(lastColor, 'another');
+	}
+}
+function turnAll(mode){
+	if(mode){
+		if (!KitchenEnabled) {
+			changeColorEnablingButtons('change-bg-kitchen', 'status-kitchen');
+			KitchenEnabled = 1;
+		}
+		if (!BathroomEnabled) {
+			changeColorEnablingButtons('change-bg-bathroom', 'status-bathroom');
+			BathroomEnabled = 1;
+		}
+		if (!HallwayEnabled) {
+			changeColorEnablingButtons('change-bg-hallway', 'status-hallway');
+			HallwayEnabled = 1;
+		}
+		if (!LivingEnabled) {
+			changeColorEnablingButtons('change-bg-living', 'status-living');
+			LivingEnabled = 1;
+		}
+	}
+	else{
+		if (KitchenEnabled) {
+			changeColorEnablingButtons('change-bg-kitchen', 'status-kitchen');
+			KitchenEnabled = 0;
+		}
+		if (BathroomEnabled) {
+			changeColorEnablingButtons('change-bg-bathroom', 'status-bathroom');
+			BathroomEnabled = 0;
+		}
+		if (HallwayEnabled) {
+			changeColorEnablingButtons('change-bg-hallway', 'status-hallway');
+			HallwayEnabled = 0;
+		}
+		if (LivingEnabled) {
+			changeColorEnablingButtons('change-bg-living', 'status-living');
+			LivingEnabled = 0;
+		}
+	}
+}
+function workWithColors(LC, mode){
+	if(mode == "circle"){
+		var wd = allColor;
+		var st = "4px solid #FFFFFF"
+	}
+	else{
+		var wd = LC;
+		var st = "0px"
+	}
+	if(wd == "#E1C00F"){
+		var col = document.getElementById("yellow-button");
+		col.style.border = 	st;
+	}
+	else if(wd == "#F513B6"){
+		var col = document.getElementById("pink-button");
+		col.style.border = 	st;
+	}
+	else if(wd == "#E03838"){
+		var col = document.getElementById("red-button");
+		col.style.border = 	st;
+	}
+	else if(wd == "#294FD6"){
+		var col = document.getElementById("blue-button");
+		col.style.border = 	st;
+	}
+	else if(wd == "#17D262"){
+		var col = document.getElementById("green-button");
+		col.style.border = 	st;
+	}
+}
+
+function changeKitchenOnClick(){
+  turnKitchen(KitchenEnabled);
+  changeColorEnablingButtons('change-bg-kitchen', 'status-kitchen');
+}
+
+function changeLivingOnClick(){
+  turnLiving(LivingEnabled);
+  changeColorEnablingButtons('change-bg-living', 'status-living');
+}
+
+function changeBathroomOnClick(){
+  turnBathroom(BathroomEnabled);
+  changeColorEnablingButtons('change-bg-bathroom', 'status-bathroom');
+}
+
+function changeHallwayOnClick(){
+  turnHallway(HallwayEnabled);
+  changeColorEnablingButtons('change-bg-hallway', 'status-hallway');
+}
+
+function changeAllOnClick(){
+  turnAllLeds(true);
+  turnAll(true);
+}
+
+function changeAllOffClick(){
+  turnAllLedsOff(true);
+  turnAll(false);
+  
+}
+
+
+function loadDoc()
+{
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("state").innerHTML = this.responseText;
+    }
+  };
+  xhttp.open("GET", "led_set?state="+ "1", true);
+  xhttp.send();
+}
+
+function turnKitchen(led_sts) 
+{
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("change-bg-kitchen").innerHTML = this.responseText;
+    }
+  };
+  xhttp.open("GET", "led_set_on_kitchen?Kitchenstate="+led_sts, true);
+  xhttp.send();
+}
+
+function turnLiving(led_sts) 
+{
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("change-bg-living").innerHTML = this.responseText;
+    }
+  };
+  xhttp.open("GET", "led_set_on_living?Livingstate="+led_sts, true);
+  xhttp.send();
+}
+
+function turnBathroom(led_sts) 
+{
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("change-bg-bathroom").innerHTML = this.responseText;
+    }
+  };
+  xhttp.open("GET", "led_set_on_bathroom?Bathroomstate="+led_sts, true);
+  xhttp.send();
+}
+
+function turnHallway(led_sts) 
+{
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("change-bg-hallway").innerHTML = this.responseText;
+    }
+  };
+  xhttp.open("GET", "led_set_on_hallway?Hallwaystate="+led_sts, true);
+  xhttp.send();
+}
+
+function turnAllLeds(led_sts) 
+{
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("turn-on-all-leds").innerHTML = this.responseText;
+    }
+  };
+  xhttp.open("GET", "led_set_on_all?AllLedsstate="+led_sts, true);
+  xhttp.send();
+}
+
+function turnAllLedsOff(led_sts) 
+{
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("turn-off-all-leds").innerHTML = this.responseText;
+    }
+  };
+  xhttp.open("GET", "led_set_off_all?AllLedsstateOff="+led_sts, true);
+  xhttp.send();
+}
+
+function ChangeColorMatrix(color) 
+{
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      if (color == "yellow") {
+        document.getElementById("yellow-button").innerHTML = this.responseText;}
+      if (color == "green") {
+        document.getElementById("green-button").innerHTML = this.responseText;}    
+      if (color == "blue") {
+        document.getElementById("blue-button").innerHTML = this.responseText;}
+      if (color == "red") {
+        document.getElementById("red-button").innerHTML = this.responseText;}
+      if (color == "pink") {
+        document.getElementById("pink-button").innerHTML = this.responseText;}
+      
+    }
+  };
+  xhttp.open("GET", "changeColor?WhichColor="+color, true);
+  xhttp.send();
+}
+
+	</script>
+</body>
+</body>
+</html>
+)=====";
+server.send(200, "text/html", ptr);
+}
+
+void kitchen_led_control() {
+  String state;
+  String act_state = server.arg("Kitchenstate");
+  Serial.print(act_state);
+  if (act_state == "1") {
+    LEDKitchen = LOW;  //LED ON
+    state = "ON";
+  }
+  else {
+    LEDKitchen = HIGH;  //LED OFF
+    state = "OFF";
+  }
+  server.send(200, "text/plane", state);
+}
+
+void living_led_control() {
+  String state;
+  String act_state = server.arg("Livingstate");
+  Serial.print(act_state);
+  if (act_state == "1") {
+    LEDLiving = LOW;  //LED ON
+    state = "ON";
+  }
+  else {
+    LEDLiving = HIGH;  //LED OFF
+    state = "OFF";
+  }
+  server.send(200, "text/plane", state);
+}
+
+void bathroom_led_control() {
+  String state;
+  String act_state = server.arg("Bathroomstate");
+  Serial.print(act_state);
+  if (act_state == "1") {
+    LEDBathroom = LOW;  //LED ON
+    state = "ON";
+  }
+  else {
+    LEDBathroom = HIGH;  //LED OFF
+    state = "OFF";
+  }
+  server.send(200, "text/plane", state);
+}
+
+void hallway_led_control() {
+  String state;
+  String act_state = server.arg("Hallwaystate");
+  Serial.print(act_state);
+  if (act_state == "1") {
+    LEDHallway = LOW;  //LED ON
+    state = "ON";
+  }
+  else {
+    LEDHallway = HIGH;  //LED OFF
+    state = "OFF";
+  }
+  server.send(200, "text/plane", state);
+}
+
+void all_led_control() {
+  String state;
+  String act_state = server.arg("AllLedsstate");
+  Serial.print(act_state);
+  if (act_state == "1") {
+    LEDKitchen = LOW;
+    LEDLiving = LOW;
+    LEDBathroom = LOW;
+    LEDHallway = LOW;  //LED ON
+    state = "Включить все";
+  }
+  else {
+    LEDKitchen = HIGH;
+    LEDLiving = HIGH;
+    LEDBathroom = HIGH;
+    LEDHallway = HIGH;  //LED OFF
+    state = "Включить все";
+  }
+  server.send(200, "text/plane", state);
+}
+
+void all_led_off_control() {
+  String state;
+  String act_state = server.arg("AllLedsstateOff");
+  Serial.print(act_state);
+  if (act_state == "1") {
+    LEDKitchen = HIGH;
+    LEDLiving = HIGH;
+    LEDBathroom = HIGH;
+    LEDHallway = HIGH;  //LED ON
+    state = "Выключить все";
+  }
+  else {
+    LEDKitchen = LOW;
+    LEDLiving = LOW;
+    LEDBathroom = LOW;
+    LEDHallway = LOW;  //LED OFF
+    state = "Выключить все";
+  }
+  server.send(200, "text/plane", state);
+}
+
+void ChangeMatrixColor() {
+  String state;
+  String act_state = server.arg("WhichColor");
+  Serial.print(act_state);
+  if (act_state == "yellow") {
+    start_color = 66;}
+  if (act_state == "green") {
+    start_color = 90;}    
+  if (act_state == "blue") {
+    start_color = 150;}
+  if (act_state == "red") {
+    start_color = 4;}
+  if (act_state == "pink") {
+    start_color = 237;}
+  state = "";
+  server.send(200, "text/plane", state);
+}
