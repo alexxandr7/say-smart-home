@@ -85,8 +85,8 @@ uint8_t HUE[16][16] = {
 
 
 //Имя и пароль точки доступа
-const char* ssid = "NodeMCU";       // SSID
-const char* password = "123456783";  // пароль
+const char* ssid = "NodeMCU";       // Укажите свой SSID
+const char* password = "123456783";  // Укажите пароль к WiFi
 
 /* Настройки IP адреса */
 IPAddress local_ip(192,168,1,1);
@@ -256,8 +256,8 @@ void setup()
   activate_register(0, true);
 
   //Раздаем WiFi
-  WiFi.softAP(ssid, password);
-  WiFi.softAPConfig(local_ip, gateway, subnet);
+  WiFi.begin(ssid, password);
+
   delay(100);
   
   server.on("/", handleRoot);
